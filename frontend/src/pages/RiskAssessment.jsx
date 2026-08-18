@@ -523,7 +523,7 @@ const RiskAssessment = () => {
                 {/* Field 3: Risk Class */}
                 <div className="form-group">
                   <label className="form-label">
-                    Risk Class <span className="required">*</span>
+                    Class <span className="required">*</span>
                   </label>
                   <select
                     className="form-control"
@@ -532,7 +532,7 @@ const RiskAssessment = () => {
                     onChange={handlePrimaryChange}
                     required
                   >
-                    <option value="">Select risk class</option>
+                    <option value="">Select  class</option>
                     {options.risk_classes.map((rc, idx) => (
                       <option key={idx} value={rc}>Class {rc}</option>
                     ))}
