@@ -6,8 +6,18 @@ from app.config import settings
 
 logger = logging.getLogger("meddevice.db")
 
+database_url = settings.DATABASE_URL
+
+# Use PyMySQL driver for MySQL
+if database_url.startswith("mysql://"):
+    database_url = database_url.replace(
+        "mysql://",
+        "mysql+pymysql://",
+        1
+    )
+
 engine = create_engine(
-    settings.DATABASE_URL,
+    database_url,
     pool_pre_ping=True,
     pool_recycle=3600,
     pool_size=10,
