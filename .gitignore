@@ -1,0 +1,76 @@
+# Environment & Secrets
+.env
+*.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.cert
+*.crt
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Node & Package Managers
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Frontend Build & Bundles
+dist/
+dist-ssr/
+build/
+.vite/
+*.local
+
+# IDE & Operating System
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.bak
+
+# Large raw datasets (>100MB exceeds GitHub push limits)
+# Note: Keep table schemas and seed scripts in repo
+data/*.csv
+data/*.zip
+data/*.tar.gz
+data/*.parquet
+
+# Machine Learning Model Artifacts
+# Note: backend/ml/medical_device_xgboost_13features.pkl is ~419KB and required at runtime.
+# It is tracked. If large checkpoint files are generated, ignore them below:
+*.ckpt
+*.h5
+*.onnx
