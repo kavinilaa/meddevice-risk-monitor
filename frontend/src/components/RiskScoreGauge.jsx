@@ -20,7 +20,7 @@ const RiskScoreGauge = ({ scorePercentage, riskLevel }) => {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
         <div>
           <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-            Model Estimated Risk Score
+            Model Risk Score
           </span>
           <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '2px' }}>
             Historical probability derived directly from XGBoost pipeline
@@ -28,7 +28,7 @@ const RiskScoreGauge = ({ scorePercentage, riskLevel }) => {
         </div>
         <div style={{ textAlign: 'right' }}>
           <span style={{ fontSize: '2.25rem', fontWeight: 800, color: barColor, lineHeight: 1 }}>
-            {pct.toFixed(1)}%
+            {pct.toFixed(2)}%
           </span>
         </div>
       </div>

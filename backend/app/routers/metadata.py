@@ -1,6 +1,6 @@
 import logging
-from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, Query
+from typing import List, Optional, Dict, Any, Tuple
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func, distinct
 
@@ -9,7 +9,9 @@ from app.models.dataset import Manufacturer, Device, Event
 from app.schemas.metadata import (
     MetadataOptionsResponse,
     HistoricalCountsResponse,
-    DatasetStatsResponse
+    DatasetStatsResponse,
+    DeviceHistoryPoint,
+    DeviceHistoryResponse
 )
 
 logger = logging.getLogger("meddevice.metadata")
@@ -91,6 +93,159 @@ def search_manufacturers(
         "page": page,
         "limit": limit
     }
+
+@router.get("/devices")
+def search_devices(
+    search: Optional[str] = Query(None, min_length=1, description="Search term for device name"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db)
+):
+    """
+    Search device names safely using parameterized SQL queries with pagination.
+    Used to power the Device Name searchable input on the Risk Assessment form.
+    """
+    query = db.query(Device.id, Device.name, Device.classification, Device.manufacturer_id).filter(Device.name.isnot(None))
+    if search:
+        query = query.filter(Device.name.ilike(f"%{search}%"))
+
+    total = query.count()
+    offset = (page - 1) * limit
+    items = query.order_by(Device.name).offset(offset).limit(limit).all()
+
+    return {
+        "items": [{"id": d.id, "name": d.name, "classification": d.classification} for d in items],
+        "total": total,
+        "page": page,
+        "limit": limit
+    }
+
+def _classify_device_trend(history: List[DeviceHistoryPoint]) -> Tuple[str, str, str, Optional[float]]:
+    """
+    Deterministic, explainable trend classification based purely on the device's
+    actual yearly event counts (no ML/model involvement). Compares the average
+    event activity in the earlier half of the observed year range against the
+    recent half:
+      - <=15% growth (including flat or declining activity) -> Stable
+      - 15%-75% growth  -> Increasing
+      - >75% growth     -> Rapidly Increasing
+    Returns (trend, trend_direction, explanation, growth_ratio).
+    """
+    counts = [p.event_count for p in history]
+    n = len(counts)
+
+    if n < 2:
+        return (
+            "Stable",
+            "stable",
+            "Only limited historical event data is available for this device; insufficient history to establish a clear trend.",
+            None
+        )
+
+    mid = max(1, n // 2)
+    early_avg = sum(counts[:mid]) / mid
+    recent_avg = sum(counts[mid:]) / (n - mid)
+    growth_ratio = (recent_avg - early_avg) / max(early_avg, 1.0)
+
+    if growth_ratio <= 0.15:
+        return (
+            "Stable",
+            "stable",
+            "Historical event activity has remained relatively consistent.",
+            round(growth_ratio, 3)
+        )
+    elif growth_ratio <= 0.75:
+        return (
+            "Increasing",
+            "up",
+            "Historical event activity shows a gradual upward trend.",
+            round(growth_ratio, 3)
+        )
+    else:
+        return (
+            "Rapidly Increasing",
+            "up_rapid",
+            "Historical event activity has increased significantly in recent years.",
+            round(growth_ratio, 3)
+        )
+
+@router.get("/devices/{device_id}/history", response_model=DeviceHistoryResponse)
+def get_device_history(device_id: str, db: Session = Depends(get_db)):
+    """
+    Returns the actual year-by-year event count history for a specific device
+    (grouped from the real MySQL Event records tied to this device_id), plus a
+    deterministic trend classification derived purely from that historical data.
+    This is independent of and complementary to the XGBoost risk prediction.
+    """
+    device = db.query(Device).filter(Device.id == device_id).first()
+    if not device:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found.")
+
+    total_event_count = db.query(func.count(Event.id)).filter(Event.device_id == device_id).scalar() or 0
+
+    rows = (
+        db.query(Event.event_year, func.count(Event.id))
+        .filter(
+            Event.device_id == device_id,
+            Event.event_year.isnot(None),
+            Event.event_year >= 1980,
+            Event.event_year <= 2035,
+        )
+        .group_by(Event.event_year)
+        .order_by(Event.event_year)
+        .all()
+    )
+
+    if not rows:
+        # Distinguish "device has zero events" from "device has events, but none
+        # carry a usable event_year" — this dataset has a meaningful share of
+        # undated records, and conflating the two would misrepresent the device.
+        if total_event_count == 0:
+            explanation = "No historical event data available for this device."
+        else:
+            explanation = (
+                f"This device has {total_event_count} recorded historical event(s), but none include "
+                "a usable event year, so a yearly trend cannot be displayed."
+            )
+        return DeviceHistoryResponse(
+            device_id=device_id,
+            device_name=device.name or "Unknown Device",
+            history=[],
+            trend=None,
+            trend_direction=None,
+            explanation=explanation,
+            total_events=total_event_count,
+            years_observed=0,
+            growth_ratio=None,
+        )
+
+    counts_by_year = {int(year): int(count) for year, count in rows}
+    min_year, max_year = min(counts_by_year), max(counts_by_year)
+
+    # Zero-fill any gap years so the timeline/chart reflects the true continuous span
+    history = [
+        DeviceHistoryPoint(year=y, event_count=counts_by_year.get(y, 0))
+        for y in range(min_year, max_year + 1)
+    ]
+
+    trend, trend_direction, explanation, growth_ratio = _classify_device_trend(history)
+
+    return DeviceHistoryResponse(
+        device_id=device_id,
+        device_name=device.name or "Unknown Device",
+        history=history,
+        trend=trend,
+        trend_direction=trend_direction,
+        explanation=explanation,
+        total_events=sum(counts_by_year.values()),
+        years_observed=len(counts_by_year),
+        growth_ratio=growth_ratio,
+    )
+
+@router.get("/device-categories", response_model=List[str])
+def get_device_categories(db: Session = Depends(get_db)):
+    """Alias of /classifications — the device classification specialty acts as the Device Category."""
+    return get_classifications(db)
 
 @router.get("/options", response_model=MetadataOptionsResponse)
 def get_all_metadata_options(db: Session = Depends(get_db)):

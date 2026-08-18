@@ -324,6 +324,12 @@ select.form-control {
   border: 1px solid var(--border-subtle);
 }
 
+.badge-warning {
+  background-color: var(--warning-bg);
+  color: var(--warning-text);
+  border: 1px solid var(--warning-border);
+}
+
 /* Tables */
 .table-container {
   width: 100%;
@@ -439,5 +445,39 @@ select.form-control {
   }
   .page-body {
     padding: 1rem;
+  }
+}
+
+/* Print Report (What-If simulator / Download Report feature) */
+.print-report {
+  display: none;
+}
+
+@media print {
+  aside,
+  header,
+  form,
+  .no-print {
+    display: none !important;
+  }
+
+  .print-report {
+    display: block !important;
+    color: #000000;
+    font-family: Georgia, 'Times New Roman', serif;
+  }
+
+  .app-container,
+  .main-content,
+  .page-body {
+    display: block !important;
+    background: #ffffff !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    max-width: none !important;
+  }
+
+  body {
+    background: #ffffff !important;
   }
 }

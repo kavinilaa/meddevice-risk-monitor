@@ -17,15 +17,22 @@ class FeatureItemProvenance(BaseModel):
     source: str        # 'User selection', 'MySQL historical dataset', 'Historical event record', 'User provided'
 
 class PredictionAssessmentRequest(BaseModel):
-    # 5 PRIMARY USER-FACING FIELDS (Classification is derived automatically by backend)
-    type: str = Field(..., min_length=1, description="Event / Alert Type (e.g. Field Safety Notice, Recall)")
-    status: str = Field(..., min_length=1, description="Action / Regulatory Status (e.g. Completed, Open Classified)")
-    risk_class: str = Field(..., min_length=1, description="Risk Class (e.g. 1, 2, 3, II, HDE)")
+    # PRIMARY USER-FACING FIELDS
     implanted: str = Field(..., min_length=1, description="Implant Status ('YES', 'NO', 'Yes — Implanted', 'No — Non-implanted')")
     name_manufacturer: str = Field(..., min_length=1, description="Manufacturer Name from MySQL dataset")
 
-    # OPTIONAL / DERIVED MODEL FEATURES (Retrieved from MySQL if omitted)
-    classification: Optional[str] = Field(None, description="Device Classification Specialty (Derived from MySQL dataset if omitted)")
+    # Device Name is not itself one of the 13 model features. It is used to look up
+    # historical device records in MySQL to help derive the hidden model features below.
+    name_device: Optional[str] = Field(None, description="Device Name (used for historical lookup; not a direct model feature)")
+
+    # OPTIONAL / DERIVED MODEL FEATURES (Retrieved from MySQL if omitted).
+    # type, status and risk_class are no longer collected directly from the user;
+    # they are derived from historical MySQL records for the matched device /
+    # manufacturer / classification (see feature_builder.py).
+    type: Optional[str] = Field(None, description="Event / Alert Type (e.g. Field Safety Notice, Recall) — derived from MySQL if omitted")
+    status: Optional[str] = Field(None, description="Action / Regulatory Status (e.g. Completed, Open Classified) — derived from MySQL if omitted")
+    risk_class: Optional[str] = Field(None, description="Risk Class (e.g. 1, 2, 3, II, HDE) — derived from MySQL if omitted")
+    classification: Optional[str] = Field(None, description="Device Category / Classification Specialty (user-selected; derived from MySQL dataset if omitted)")
     country_event: Optional[str] = Field(None, description="Country of Event (ISO 3-letter code)")
     country_device: Optional[str] = Field(None, description="Country of Device Origin (ISO 3-letter code)")
     quantity_in_commerce: Optional[float] = Field(None, ge=0, description="Commercial Distribution Volume")

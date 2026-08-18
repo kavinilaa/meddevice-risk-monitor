@@ -54,32 +54,32 @@ class FeatureBuilderService:
         req_data: Dict[str, Any]
     ) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
         """
-        Takes the 5 user-supplied primary fields (type, status, risk_class, implanted, name_manufacturer)
-        plus any optional additional fields, derives the hidden model features (including classification)
-        from the real MySQL dataset, validates all 13 features, and returns the DataFrame in exact order
-        along with feature provenance tracking.
+        Takes the user-supplied primary fields (device name, device category / classification,
+        manufacturer, implant status) plus any optional additional fields, derives the hidden
+        model features (type, status, risk_class, country_*, quantity_in_commerce, event counts,
+        event_year/month) from the real MySQL dataset, validates all 13 features, and returns the
+        DataFrame in exact order along with feature provenance tracking.
         """
         missing_fields = []
         provenance: Dict[str, Dict[str, Any]] = {}
 
-        # 1. Primary 5 User Fields
-        m_type = str(req_data.get("type") or "").strip()
-        m_status = str(req_data.get("status") or "").strip()
-        m_risk_class = str(req_data.get("risk_class") or "").strip()
+        # 1. Primary User Fields
+        m_device_name = str(req_data.get("name_device") or "").strip()
         m_implanted_raw = str(req_data.get("implanted") or "").strip()
         m_manufacturer = str(req_data.get("name_manufacturer") or "").strip()
 
-        if not m_type: missing_fields.append("Event / Alert Type (type)")
-        if not m_status: missing_fields.append("Action / Regulatory Status (status)")
-        if not m_risk_class: missing_fields.append("Risk Class (risk_class)")
         if not m_implanted_raw: missing_fields.append("Implant Status (implanted)")
         if not m_manufacturer: missing_fields.append("Manufacturer (name_manufacturer)")
 
+        # type, status and risk_class are no longer collected on the user-facing form.
+        # They may still arrive via the API (backwards compatibility / advanced callers);
+        # if omitted, they are derived from MySQL historical records below.
+        req_type = str(req_data.get("type") or "").strip()
+        req_status = str(req_data.get("status") or "").strip()
+        req_risk_class = str(req_data.get("risk_class") or "").strip()
+
         m_implanted = self.map_implant_status(m_implanted_raw)
 
-        provenance["type"] = {"val": m_type, "src": "User selection"}
-        provenance["status"] = {"val": m_status, "src": "User selection"}
-        provenance["risk_class"] = {"val": m_risk_class, "src": "User selection"}
         provenance["implanted"] = {"val": m_implanted, "src": "User selection"}
         provenance["name_manufacturer"] = {"val": m_manufacturer, "src": "User selection"}
 
@@ -87,8 +87,20 @@ class FeatureBuilderService:
         mfr_records = []
         if m_manufacturer:
             mfr_records = db.query(Manufacturer).filter(Manufacturer.name.ilike(f"%{m_manufacturer}%")).limit(50).all()
-        
+
         mfr_ids = [m.id for m in mfr_records]
+
+        # 2b. Try to resolve a specific matched device from the Device Name field.
+        # This is used only to improve derivation accuracy for hidden model features;
+        # Device Name itself is not one of the 13 trained model features.
+        matched_device = None
+        if m_device_name:
+            device_query = db.query(Device).filter(Device.name.ilike(f"%{m_device_name}%"))
+            if mfr_ids:
+                scoped = device_query.filter(Device.manufacturer_id.in_(mfr_ids)).first()
+                matched_device = scoped if scoped else device_query.first()
+            else:
+                matched_device = device_query.first()
 
         # 3. Derive Classification from MySQL if omitted
         m_classification = str(req_data.get("classification") or "").strip()
@@ -107,9 +119,9 @@ class FeatureBuilderService:
                     provenance["classification"] = {"val": m_classification, "src": "MySQL historical dataset"}
             
             # If no device records for this manufacturer, query by risk_class in MySQL
-            if not m_classification and m_risk_class:
+            if not m_classification and req_risk_class:
                 rc_class = db.query(Device.classification).filter(
-                    Device.risk_class == m_risk_class,
+                    Device.risk_class == req_risk_class,
                     Device.classification.isnot(None)
                 ).group_by(Device.classification).order_by(func.count(Device.id).desc()).first()
                 if rc_class and rc_class[0]:
@@ -121,6 +133,92 @@ class FeatureBuilderService:
                 top_class = db.query(Device.classification).filter(Device.classification.isnot(None)).first()
                 m_classification = top_class[0] if top_class else "Cardiovascular Devices"
                 provenance["classification"] = {"val": m_classification, "src": "Dataset catalog baseline"}
+
+        # 3b. Derive risk_class from MySQL if omitted (no longer collected on the form)
+        if req_risk_class:
+            m_risk_class = req_risk_class
+            provenance["risk_class"] = {"val": m_risk_class, "src": "User provided"}
+        else:
+            m_risk_class = ""
+            if matched_device and matched_device.risk_class:
+                m_risk_class = matched_device.risk_class
+                provenance["risk_class"] = {"val": m_risk_class, "src": "Matched device record"}
+            if not m_risk_class and mfr_ids:
+                mfr_rc = db.query(Device.risk_class).filter(
+                    Device.manufacturer_id.in_(mfr_ids),
+                    Device.risk_class.isnot(None)
+                ).group_by(Device.risk_class).order_by(func.count(Device.id).desc()).first()
+                if mfr_rc and mfr_rc[0]:
+                    m_risk_class = mfr_rc[0]
+                    provenance["risk_class"] = {"val": m_risk_class, "src": "MySQL historical dataset"}
+            if not m_risk_class and m_classification:
+                cls_rc = db.query(Device.risk_class).filter(
+                    Device.classification.ilike(f"%{m_classification}%"),
+                    Device.risk_class.isnot(None)
+                ).group_by(Device.risk_class).order_by(func.count(Device.id).desc()).first()
+                if cls_rc and cls_rc[0]:
+                    m_risk_class = cls_rc[0]
+                    provenance["risk_class"] = {"val": m_risk_class, "src": "MySQL historical dataset"}
+            if not m_risk_class:
+                top_rc = db.query(Device.risk_class).filter(Device.risk_class.isnot(None)).first()
+                m_risk_class = top_rc[0] if top_rc else "2"
+                provenance["risk_class"] = {"val": m_risk_class, "src": "Dataset catalog baseline"}
+
+        # 3c. Derive type (Event / Alert Type) from MySQL if omitted (no longer collected on the form)
+        matched_device_ids = [matched_device.id] if matched_device else []
+        mfr_device_ids = [d[0] for d in db.query(Device.id).filter(Device.manufacturer_id.in_(mfr_ids)).all()] if mfr_ids else []
+        classification_device_ids = [d[0] for d in db.query(Device.id).filter(
+            Device.classification.ilike(f"%{m_classification}%")
+        ).limit(200).all()] if m_classification else []
+
+        if req_type:
+            m_type = req_type
+            provenance["type"] = {"val": m_type, "src": "User provided"}
+        else:
+            m_type = ""
+            for candidate_ids, source_label in (
+                (matched_device_ids, "Matched device record"),
+                (mfr_device_ids, "MySQL historical dataset"),
+                (classification_device_ids, "MySQL historical dataset"),
+            ):
+                if candidate_ids:
+                    top_type = db.query(Event.type).filter(
+                        Event.device_id.in_(candidate_ids),
+                        Event.type.isnot(None)
+                    ).group_by(Event.type).order_by(func.count(Event.id).desc()).first()
+                    if top_type and top_type[0]:
+                        m_type = top_type[0]
+                        provenance["type"] = {"val": m_type, "src": source_label}
+                        break
+            if not m_type:
+                top_type = db.query(Event.type).filter(Event.type.isnot(None)).group_by(Event.type).order_by(func.count(Event.id).desc()).first()
+                m_type = top_type[0] if top_type else "Recall"
+                provenance["type"] = {"val": m_type, "src": "Dataset catalog baseline"}
+
+        # 3d. Derive status (Action / Regulatory Status) from MySQL if omitted (no longer collected on the form)
+        if req_status:
+            m_status = req_status
+            provenance["status"] = {"val": m_status, "src": "User provided"}
+        else:
+            m_status = ""
+            for candidate_ids, source_label in (
+                (matched_device_ids, "Matched device record"),
+                (mfr_device_ids, "MySQL historical dataset"),
+                (classification_device_ids, "MySQL historical dataset"),
+            ):
+                if candidate_ids:
+                    top_status = db.query(Event.status).filter(
+                        Event.device_id.in_(candidate_ids),
+                        Event.status.isnot(None)
+                    ).group_by(Event.status).order_by(func.count(Event.id).desc()).first()
+                    if top_status and top_status[0]:
+                        m_status = top_status[0]
+                        provenance["status"] = {"val": m_status, "src": source_label}
+                        break
+            if not m_status:
+                top_status = db.query(Event.status).filter(Event.status.isnot(None)).group_by(Event.status).order_by(func.count(Event.id).desc()).first()
+                m_status = top_status[0] if top_status else "Completed"
+                provenance["status"] = {"val": m_status, "src": "Dataset catalog baseline"}
 
         # 4. Calculate manufacturer_event_count from MySQL
         mfr_event_count = None
@@ -154,7 +252,13 @@ class FeatureBuilderService:
                 pass
 
         if event_count is None:
-            if mfr_ids and m_classification:
+            if matched_device_ids:
+                db_device_events = db.query(Event).filter(Event.device_id.in_(matched_device_ids)).count()
+                if db_device_events > 0:
+                    event_count = db_device_events
+                    provenance["event_count"] = {"val": event_count, "src": "Matched device record"}
+
+            if event_count is None and mfr_ids and m_classification:
                 target_dev_ids = [d[0] for d in db.query(Device.id).filter(
                     Device.manufacturer_id.in_(mfr_ids),
                     Device.classification.ilike(f"%{m_classification}%")
@@ -182,7 +286,10 @@ class FeatureBuilderService:
             provenance["country_device"] = {"val": country_device, "src": "User selection"}
         else:
             country_device = ""
-            if mfr_ids:
+            if matched_device and matched_device.country:
+                country_device = matched_device.country.upper()
+                provenance["country_device"] = {"val": country_device, "src": "Matched device record"}
+            if not country_device and mfr_ids:
                 dev_countries = db.query(Device.country).filter(
                     Device.manufacturer_id.in_(mfr_ids),
                     Device.country.isnot(None)
@@ -222,6 +329,10 @@ class FeatureBuilderService:
                 provenance["quantity_in_commerce"] = {"val": quantity_in_commerce, "src": "User provided"}
             except Exception:
                 pass
+
+        if quantity_in_commerce is None and matched_device and matched_device.quantity_in_commerce and matched_device.quantity_in_commerce > 0:
+            quantity_in_commerce = round(float(matched_device.quantity_in_commerce), 1)
+            provenance["quantity_in_commerce"] = {"val": quantity_in_commerce, "src": "Matched device record"}
 
         if quantity_in_commerce is None and mfr_ids:
             avg_res = db.query(func.avg(Device.quantity_in_commerce)).filter(

@@ -11,7 +11,8 @@ import {
   ChevronUp,
   RotateCcw,
   Layers,
-  HelpCircle
+  HelpCircle,
+  Download
 } from 'lucide-react';
 import Sidebar from '../components/Sidebar';
 import Header from '../components/Header';
@@ -20,29 +21,26 @@ import RiskBadge from '../components/RiskBadge';
 import RiskFactorsList from '../components/RiskFactorsList';
 import MaintenanceBox from '../components/MaintenanceBox';
 import RiskComparisonChart from '../charts/RiskComparisonChart';
+import RiskTrendTimeline from '../components/RiskTrendTimeline';
 import { metadataApi, predictionApi } from '../services/api';
 
 const RiskAssessment = () => {
   // Dropdown Metadata State
   const [options, setOptions] = useState({
-    types: [],
-    statuses: [],
-    risk_classes: [],
+    device_categories: [],
     countries: [],
   });
 
-  // 5 Primary User Form Fields (Starts completely empty as required)
+  // 4 Primary User Form Fields (Starts completely empty as required)
   const [primaryForm, setPrimaryForm] = useState({
-    type: '',
-    status: '',
-    risk_class: '',
+    name_device: '',
+    classification: '',
     implanted: '',
     name_manufacturer: '',
   });
 
   // Optional Additional Fields (for collapsible accordion)
   const [additionalForm, setAdditionalForm] = useState({
-    classification: '',
     country_event: '',
     country_device: '',
     quantity_in_commerce: '',
@@ -66,6 +64,13 @@ const RiskAssessment = () => {
   const [showMfrDropdown, setShowMfrDropdown] = useState(false);
   const mfrWrapperRef = useRef(null);
 
+  // Device Name Server-Side Autocomplete
+  const [deviceSearch, setDeviceSearch] = useState('');
+  const [deviceSuggestions, setDeviceSuggestions] = useState([]);
+  const [isSearchingDevice, setIsSearchingDevice] = useState(false);
+  const [showDeviceDropdown, setShowDeviceDropdown] = useState(false);
+  const deviceWrapperRef = useRef(null);
+
   // UI Accordion States
   const [showAdditional, setShowAdditional] = useState(false);
   const [showModelFeatures, setShowModelFeatures] = useState(false);
@@ -74,21 +79,25 @@ const RiskAssessment = () => {
   const [validationError, setValidationError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [assessmentResult, setAssessmentResult] = useState(null);
+  // Device Name isn't part of the model / prediction response, so it's captured
+  // separately at submission time purely for display in the result & PDF report.
+  const [assessedDeviceName, setAssessedDeviceName] = useState('');
+  // The exact Device record id, captured only when the user picks a suggestion from
+  // the search dropdown (not on free-typed text) so the Risk Trend Timeline always
+  // reflects one specific, unambiguous device's real historical event data.
+  const [selectedDeviceId, setSelectedDeviceId] = useState(null);
+  const [assessedDeviceId, setAssessedDeviceId] = useState(null);
 
   // Initial Metadata Load
   useEffect(() => {
     const fetchMetadata = async () => {
       try {
-        const [typesRes, statusesRes, riskRes, countryRes] = await Promise.all([
-          metadataApi.getEventTypes(),
-          metadataApi.getStatuses(),
-          metadataApi.getRiskClasses(),
+        const [categoriesRes, countryRes] = await Promise.all([
+          metadataApi.getDeviceCategories(),
           metadataApi.getCountries(),
         ]);
         setOptions({
-          types: typesRes.data || [],
-          statuses: statusesRes.data || [],
-          risk_classes: riskRes.data || [],
+          device_categories: categoriesRes.data || [],
           countries: countryRes.data || [],
         });
       } catch (err) {
@@ -121,18 +130,44 @@ const RiskAssessment = () => {
     return () => clearTimeout(timer);
   }, [mfrSearch]);
 
-  // Click outside to close manufacturer suggestions
+  // Debounced Server-Side Device Name Search
+  useEffect(() => {
+    if (!deviceSearch.trim() || deviceSearch.length < 2) {
+      setDeviceSuggestions([]);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      setIsSearchingDevice(true);
+      try {
+        const res = await metadataApi.searchDevices(deviceSearch.trim(), 1, 20);
+        setDeviceSuggestions(res.data.items || []);
+        setShowDeviceDropdown(true);
+      } catch (err) {
+        console.warn('Device search error:', err);
+      } finally {
+        setIsSearchingDevice(false);
+      }
+    }, 250);
+
+    return () => clearTimeout(timer);
+  }, [deviceSearch]);
+
+  // Click outside to close manufacturer / device suggestion dropdowns
   useEffect(() => {
     const handleClickOutside = (event) => {
       if (mfrWrapperRef.current && !mfrWrapperRef.current.contains(event.target)) {
         setShowMfrDropdown(false);
+      }
+      if (deviceWrapperRef.current && !deviceWrapperRef.current.contains(event.target)) {
+        setShowDeviceDropdown(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Fetch Live Historical Counts from MySQL when Manufacturer changes
+  // Fetch Live Historical Counts from MySQL when Manufacturer or Device Category changes
   useEffect(() => {
     const fetchCounts = async () => {
       if (!primaryForm.name_manufacturer) {
@@ -149,7 +184,7 @@ const RiskAssessment = () => {
       try {
         const res = await metadataApi.getHistoricalCounts({
           manufacturer: primaryForm.name_manufacturer,
-          risk_class: primaryForm.risk_class || undefined,
+          classification: primaryForm.classification || undefined,
         });
         const data = res.data;
         setDerivedInfo({
@@ -165,7 +200,11 @@ const RiskAssessment = () => {
     };
 
     fetchCounts();
-  }, [primaryForm.name_manufacturer, primaryForm.risk_class]);
+  }, [primaryForm.name_manufacturer, primaryForm.classification]);
+
+  const handleDownloadReport = () => {
+    window.print();
+  };
 
   const handlePrimaryChange = (e) => {
     const { name, value } = e.target;
@@ -183,16 +222,26 @@ const RiskAssessment = () => {
     setShowMfrDropdown(false);
   };
 
+  const handleSelectDevice = (device) => {
+    setPrimaryForm((prev) => ({
+      ...prev,
+      name_device: device.name,
+      // Pre-fill Device Category from the matched device record if not already chosen
+      classification: prev.classification || device.classification || '',
+    }));
+    setSelectedDeviceId(device.id);
+    setDeviceSearch(device.name);
+    setShowDeviceDropdown(false);
+  };
+
   const handleResetForm = () => {
     setPrimaryForm({
-      type: '',
-      status: '',
-      risk_class: '',
+      name_device: '',
+      classification: '',
       implanted: '',
       name_manufacturer: '',
     });
     setAdditionalForm({
-      classification: '',
       country_event: '',
       country_device: '',
       quantity_in_commerce: '',
@@ -200,6 +249,11 @@ const RiskAssessment = () => {
       event_month: '',
     });
     setMfrSearch('');
+    setDeviceSearch('');
+    setDeviceSuggestions([]);
+    setSelectedDeviceId(null);
+    setAssessedDeviceName('');
+    setAssessedDeviceId(null);
     setDerivedInfo({
       event_count: null,
       manufacturer_event_count: null,
@@ -215,40 +269,34 @@ const RiskAssessment = () => {
     e.preventDefault();
     setValidationError('');
 
-    // Strict validation of the 5 Primary Fields
-    if (!primaryForm.type) {
-      setValidationError('Please select the Event / Alert Type.');
+    // Strict validation of the 4 Primary Fields
+    if (!primaryForm.name_device.trim()) {
+      setValidationError('Please enter or search for a Device Name.');
       return;
     }
-    if (!primaryForm.status) {
-      setValidationError('Please select the Status.');
+    if (!primaryForm.classification) {
+      setValidationError('Please select the Device Category.');
       return;
     }
-    if (!primaryForm.risk_class) {
-      setValidationError('Please select the Risk Class.');
+    if (!primaryForm.name_manufacturer.trim()) {
+      setValidationError('Please enter or search for a Manufacturer Name.');
       return;
     }
     if (!primaryForm.implanted) {
       setValidationError('Please select the Implant Status.');
       return;
     }
-    if (!primaryForm.name_manufacturer.trim()) {
-      setValidationError('Please enter or search for a Manufacturer.');
-      return;
-    }
 
     setIsSubmitting(true);
     try {
       const payload = {
-        type: primaryForm.type,
-        status: primaryForm.status,
-        risk_class: primaryForm.risk_class,
+        name_device: primaryForm.name_device.trim(),
+        classification: primaryForm.classification,
         implanted: primaryForm.implanted,
         name_manufacturer: primaryForm.name_manufacturer.trim(),
       };
 
       // Optional Additional Fields (if supplied by user)
-      if (additionalForm.classification) payload.classification = additionalForm.classification;
       if (additionalForm.country_event) payload.country_event = additionalForm.country_event;
       if (additionalForm.country_device) payload.country_device = additionalForm.country_device;
       if (additionalForm.quantity_in_commerce !== '') {
@@ -262,6 +310,8 @@ const RiskAssessment = () => {
       }
 
       const res = await predictionApi.create(payload);
+      setAssessedDeviceName(primaryForm.name_device.trim());
+      setAssessedDeviceId(selectedDeviceId);
       setAssessmentResult(res.data);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
@@ -295,7 +345,8 @@ const RiskAssessment = () => {
 
           {/* ASSESSMENT RESULT SECTION (Visible ONLY after explicit submission) */}
           {assessmentResult ? (
-            <div style={{ marginBottom: '2.5rem' }}>
+            <>
+            <div className="no-print" style={{ marginBottom: '2.5rem' }}>
               <div style={{
                 backgroundColor: '#ffffff',
                 border: '1px solid var(--border-subtle)',
@@ -317,7 +368,16 @@ const RiskAssessment = () => {
                   </div>
 
                   <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                    <RiskBadge riskLevel={assessmentResult.risk_level} size="large" />
+                    <div style={{ textAlign: 'right' }}>
+                      <span style={{ display: 'block', fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.3rem' }}>
+                        Predicted Risk Level
+                      </span>
+                      <RiskBadge riskLevel={assessmentResult.risk_level} size="large" />
+                    </div>
+                    <button onClick={handleDownloadReport} className="btn btn-secondary" style={{ fontSize: '0.85rem' }}>
+                      <Download size={15} />
+                      <span>Download Report</span>
+                    </button>
                     <button onClick={handleResetForm} className="btn btn-secondary" style={{ fontSize: '0.85rem' }}>
                       <RotateCcw size={15} />
                       <span>New Assessment</span>
@@ -325,7 +385,10 @@ const RiskAssessment = () => {
                   </div>
                 </div>
 
-                {/* Score Gauge & Volume Chart Grid */}
+                {/* Current Model Risk (XGBoost Prediction) */}
+                <span style={{ display: 'block', fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.5rem' }}>
+                  Current Model Risk (XGBoost Prediction)
+                </span>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem', marginBottom: '1.5rem' }}>
                   <RiskScoreGauge
                     scorePercentage={assessmentResult.risk_percentage}
@@ -336,6 +399,11 @@ const RiskAssessment = () => {
                     manufacturerEventCount={assessmentResult.manufacturer_event_count}
                     riskScore={assessmentResult.risk_score}
                   />
+                </div>
+
+                {/* Historical Risk Trend — independent, complementary signal to the XGBoost prediction above */}
+                <div style={{ marginBottom: '1.75rem' }}>
+                  <RiskTrendTimeline deviceId={assessedDeviceId} deviceName={assessedDeviceName} />
                 </div>
 
                 {/* SHAP Explanation Narrative */}
@@ -445,8 +513,77 @@ const RiskAssessment = () => {
                     </div>
                   )}
                 </div>
+
               </div>
             </div>
+
+            {/* PRINT-ONLY REGULATORY-STYLE REPORT (hidden on screen, shown only via window.print()) */}
+            <div className="print-report">
+              <div style={{ marginBottom: '1.5rem', borderBottom: '2px solid #0f172a', paddingBottom: '0.75rem' }}>
+                <h1 style={{ fontSize: '1.5rem', margin: 0 }}>Medical Device Risk Assessment Report</h1>
+                <p style={{ fontSize: '0.85rem', color: '#334155', marginTop: '0.35rem' }}>
+                  Assessment Date: {new Date(assessmentResult.created_at).toLocaleString()} &nbsp;|&nbsp; Report Generated: {new Date().toLocaleString()}
+                </p>
+              </div>
+
+              <h2 style={{ fontSize: '1.05rem', marginBottom: '0.5rem' }}>Device Information</h2>
+              <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '1.5rem', fontSize: '0.9rem' }}>
+                <tbody>
+                  <tr>
+                    <td style={{ padding: '0.4rem 0', width: '35%', fontWeight: 700, borderBottom: '1px solid #e2e8f0' }}>Device Name</td>
+                    <td style={{ padding: '0.4rem 0', borderBottom: '1px solid #e2e8f0' }}>{assessedDeviceName || 'N/A'}</td>
+                  </tr>
+                  <tr>
+                    <td style={{ padding: '0.4rem 0', fontWeight: 700, borderBottom: '1px solid #e2e8f0' }}>Device Category</td>
+                    <td style={{ padding: '0.4rem 0', borderBottom: '1px solid #e2e8f0' }}>{assessmentResult.classification}</td>
+                  </tr>
+                  <tr>
+                    <td style={{ padding: '0.4rem 0', fontWeight: 700, borderBottom: '1px solid #e2e8f0' }}>Manufacturer Name</td>
+                    <td style={{ padding: '0.4rem 0', borderBottom: '1px solid #e2e8f0' }}>{assessmentResult.name_manufacturer}</td>
+                  </tr>
+                  <tr>
+                    <td style={{ padding: '0.4rem 0', fontWeight: 700 }}>Implant Status</td>
+                    <td style={{ padding: '0.4rem 0' }}>{assessmentResult.implanted === 'YES' ? 'Implanted' : 'Non-implanted'}</td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <h2 style={{ fontSize: '1.05rem', marginBottom: '0.5rem' }}>AI Risk Assessment</h2>
+              <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '1.5rem', fontSize: '0.9rem' }}>
+                <tbody>
+                  <tr>
+                    <td style={{ padding: '0.4rem 0', width: '35%', fontWeight: 700, borderBottom: '1px solid #e2e8f0' }}>Predicted Risk Level</td>
+                    <td style={{ padding: '0.4rem 0', borderBottom: '1px solid #e2e8f0', fontWeight: 800 }}>{assessmentResult.risk_level} RISK</td>
+                  </tr>
+                  <tr>
+                    <td style={{ padding: '0.4rem 0', fontWeight: 700 }}>Model Risk Score</td>
+                    <td style={{ padding: '0.4rem 0', fontWeight: 800 }}>{Number(assessmentResult.risk_percentage).toFixed(2)}%</td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <h2 style={{ fontSize: '1.05rem', marginBottom: '0.5rem' }}>Why Was This Risk Predicted?</h2>
+              <p style={{ fontSize: '0.9rem', lineHeight: 1.6, marginBottom: '1.5rem' }}>{assessmentResult.explanation}</p>
+
+              <h2 style={{ fontSize: '1.05rem', marginBottom: '0.5rem' }}>Contributing Risk Factors (SHAP Model Insights)</h2>
+              <ul style={{ marginBottom: '1.5rem', paddingLeft: '1.25rem', fontSize: '0.9rem', lineHeight: 1.6 }}>
+                {(assessmentResult.risk_factors || []).map((f, idx) => (
+                  <li key={idx} style={{ marginBottom: '0.4rem' }}>
+                    <strong>{f.feature_name}</strong> ({f.impact.replace('_', ' ')}): {f.description}
+                  </li>
+                ))}
+              </ul>
+
+              <h2 style={{ fontSize: '1.05rem', marginBottom: '0.5rem' }}>Maintenance Recommendation</h2>
+              <pre style={{ fontFamily: 'inherit', whiteSpace: 'pre-wrap', fontSize: '0.9rem', lineHeight: 1.6, marginBottom: '1.5rem' }}>
+                {assessmentResult.maintenance_recommendation}
+              </pre>
+
+              <p style={{ fontSize: '0.75rem', color: '#64748b', borderTop: '1px solid #e2e8f0', paddingTop: '0.75rem' }}>
+                Generated by the MedDevice Risk Monitor decision-support platform (XGBoost model, trained on historical FDA medical-device event data).
+              </p>
+            </div>
+            </>
           ) : (
             <div style={{
               backgroundColor: '#ffffff',
@@ -466,101 +603,108 @@ const RiskAssessment = () => {
             </div>
           )}
 
-          {/* PRIMARY 5-FIELD RISK ASSESSMENT FORM */}
+          {/* PRIMARY DEVICE INFORMATION FORM */}
           <form onSubmit={handleSubmit} className="card" style={{ padding: '2rem' }}>
             <div style={{ marginBottom: '2rem' }}>
               <div style={{ marginBottom: '1.25rem', borderBottom: '1px solid var(--border-subtle)', paddingBottom: '0.75rem' }}>
                 <h3 style={{ fontSize: '1.2rem', fontWeight: 800, color: 'var(--text-primary)' }}>
-                  Primary Assessment Information
+                  Device Information
                 </h3>
                 <p style={{ fontSize: '0.825rem', color: 'var(--text-muted)' }}>
-                  Enter the 5 key device and regulatory parameters below:
+                  Enter the key device parameters below:
                 </p>
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1.25rem' }}>
-                {/* Field 1: Event / Alert Type */}
+                {/* Field 1: Device Name Search (Server-Side Autocomplete) */}
+                <div className="form-group" style={{ position: 'relative' }} ref={deviceWrapperRef}>
+                  <label className="form-label">
+                    Device Name <span className="required">*</span>
+                  </label>
+                  <div style={{ position: 'relative' }}>
+                    <input
+                      type="text"
+                      className="form-control"
+                      placeholder="Search device name..."
+                      value={deviceSearch}
+                      onChange={(e) => {
+                        setDeviceSearch(e.target.value);
+                        setPrimaryForm((prev) => ({ ...prev, name_device: e.target.value }));
+                        // Free-typed text may no longer match the previously selected
+                        // device record, so drop the id used by the Risk Trend Timeline.
+                        setSelectedDeviceId(null);
+                      }}
+                      onFocus={() => {
+                        if (deviceSuggestions.length > 0) setShowDeviceDropdown(true);
+                      }}
+                      required
+                    />
+                    <div style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }}>
+                      {isSearchingDevice ? <Activity size={16} className="animate-spin" /> : <Search size={16} />}
+                    </div>
+                  </div>
+
+                  {/* Autocomplete Suggestions */}
+                  {showDeviceDropdown && deviceSuggestions.length > 0 && (
+                    <ul style={{
+                      position: 'absolute',
+                      top: '100%',
+                      left: 0,
+                      right: 0,
+                      backgroundColor: '#ffffff',
+                      border: '1px solid var(--border-subtle)',
+                      borderRadius: 'var(--radius-sm)',
+                      boxShadow: 'var(--shadow-md)',
+                      maxHeight: '220px',
+                      overflowY: 'auto',
+                      zIndex: 30,
+                      listStyle: 'none',
+                      margin: '4px 0 0 0',
+                      padding: '4px 0',
+                    }}>
+                      {deviceSuggestions.map((item) => (
+                        <li
+                          key={item.id}
+                          onClick={() => handleSelectDevice(item)}
+                          style={{
+                            padding: '0.5rem 1rem',
+                            fontSize: '0.85rem',
+                            cursor: 'pointer',
+                            transition: 'background 0.15s ease',
+                          }}
+                          onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'var(--primary-50)')}
+                          onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+                        >
+                          <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{item.name}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
+                {/* Field 2: Device Category */}
                 <div className="form-group">
                   <label className="form-label">
-                    Event / Alert Type <span className="required">*</span>
+                    Device Category <span className="required">*</span>
                   </label>
                   <select
                     className="form-control"
-                    name="type"
-                    value={primaryForm.type}
+                    name="classification"
+                    value={primaryForm.classification}
                     onChange={handlePrimaryChange}
                     required
                   >
-                    <option value="">Select event / alert type</option>
-                    {options.types.map((t, idx) => (
-                      <option key={idx} value={t}>{t}</option>
+                    <option value="">Select device category</option>
+                    {options.device_categories.map((c, idx) => (
+                      <option key={idx} value={c}>{c}</option>
                     ))}
                   </select>
                 </div>
 
-                {/* Field 2: Status */}
-                <div className="form-group">
-                  <label className="form-label">
-                    Status <span className="required">*</span>
-                  </label>
-                  <select
-                    className="form-control"
-                    name="status"
-                    value={primaryForm.status}
-                    onChange={handlePrimaryChange}
-                    required
-                  >
-                    <option value="">Select status</option>
-                    <option value="Completed">Completed</option>
-                    <option value="Firm initiated action">Firm initiated action</option>
-                    <option value="Not yet classified">Not yet classified</option>
-                    <option value="Open, Classified">Open, Classified</option>
-                    <option value="Terminated">Terminated</option>
-                    <option value="Classified">Classified</option>
-                  </select>
-                </div>
-
-                {/* Field 3: Risk Class */}
-                <div className="form-group">
-                  <label className="form-label">
-                    Class <span className="required">*</span>
-                  </label>
-                  <select
-                    className="form-control"
-                    name="risk_class"
-                    value={primaryForm.risk_class}
-                    onChange={handlePrimaryChange}
-                    required
-                  >
-                    <option value="">Select  class</option>
-                    {options.risk_classes.map((rc, idx) => (
-                      <option key={idx} value={rc}>Class {rc}</option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* Field 4: Implant Status */}
-                <div className="form-group">
-                  <label className="form-label">
-                    Implant Status <span className="required">*</span>
-                  </label>
-                  <select
-                    className="form-control"
-                    name="implanted"
-                    value={primaryForm.implanted}
-                    onChange={handlePrimaryChange}
-                    required
-                  >
-                    <option value="">Select implant status</option>
-                    <option value="NO">No — Non-implanted</option>
-                    <option value="YES">Yes — Implanted</option>
-                  </select>
-                </div>
-
-                {/* Field 5: Manufacturer Search (Server-Side Autocomplete) */}
+                {/* Field 3: Manufacturer Name Search (Server-Side Autocomplete) */}
                 <div className="form-group" style={{ position: 'relative' }} ref={mfrWrapperRef}>
                   <label className="form-label">
-                    Manufacturer <span className="required">*</span>
+                    Manufacturer Name <span className="required">*</span>
                   </label>
                   <div style={{ position: 'relative' }}>
                     <input
@@ -618,6 +762,24 @@ const RiskAssessment = () => {
                       ))}
                     </ul>
                   )}
+                </div>
+
+                {/* Field 4: Implant Status */}
+                <div className="form-group">
+                  <label className="form-label">
+                    Implant Status <span className="required">*</span>
+                  </label>
+                  <select
+                    className="form-control"
+                    name="implanted"
+                    value={primaryForm.implanted}
+                    onChange={handlePrimaryChange}
+                    required
+                  >
+                    <option value="">Select implant status</option>
+                    <option value="NO">Non-implanted</option>
+                    <option value="YES">Implanted</option>
+                  </select>
                 </div>
               </div>
             </div>

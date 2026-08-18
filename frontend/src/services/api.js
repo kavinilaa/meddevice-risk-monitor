@@ -56,6 +56,10 @@ export const metadataApi = {
   getCountries: () => api.get('/api/metadata/countries'),
   searchManufacturers: (search, page = 1, limit = 20) =>
     api.get('/api/metadata/manufacturers', { params: { search, page, limit } }),
+  searchDevices: (search, page = 1, limit = 20) =>
+    api.get('/api/metadata/devices', { params: { search, page, limit } }),
+  getDeviceCategories: () => api.get('/api/metadata/device-categories'),
+  getDeviceHistory: (deviceId) => api.get(`/api/metadata/devices/${deviceId}/history`),
   getHistoricalCounts: (params) => api.get('/api/metadata/historical-counts', { params }),
   getDatasetStats: () => api.get('/api/metadata/dataset-stats'),
 };
